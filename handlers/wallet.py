@@ -1,104 +1,81 @@
-import asyncio
-from aiogram import Router, F, types
-from aiogram.fsm.state import State, StatesGroup
+import os
+from dotenv import load_dotenv
+from aiogram import Bot, types, Router, F
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardMarkup
+from aiogram.filters import Command
 
-from config import CARD_NUMBER, CARD_OWNER
-from databaze.main import (
-    get_user_data,
-    check_if_amount_is_busy,
-    save_active_payment,
-    delete_payment_after_delay
-)
-from keyboards.main_menu import wallet_menu, main_menu_keyboard, check_payment_kb
+load_dotenv()
 
-
-class DepositMoney(StatesGroup):
-    amount = State()
-    waiting_pay = State()
-
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+CARD_NUMBER = os.getenv("CARD_NUMBER")
+CARD_OWNER = os.getenv("CARD_OWNER")
 
 router = Router()
 
 
-@router.message(F.text == "💰 Hamyon")
-async def show_wallet(message: types.Message):
-    user = await get_user_data(message.from_user.id)
-    balance = user['balance'] if user else 0
-    await message.answer(
-        f"💰 Sizning hisobingiz: {balance} so'm\n\n"
-        "Pastdagi tugmalar orqali hamyoningizni boshqarishingiz mumkin:",
-        reply_markup=wallet_menu()
-    )
+class DepositMoney(StatesGroup):
+    amount = State()
+    waiting_photo = State()
 
 
-@router.message(F.text == "➕ Hamyonni to'ldirish")
+def admin_kb(user_id: int, amount: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Tasdiqlash", callback_data=f"adm_confirm:{user_id}:{amount}")
+    builder.button(text="❌ Rad etish", callback_data=f"adm_reject:{user_id}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+@router.message(Command("deposit"))
 async def start_deposit(message: types.Message, state: FSMContext):
-    await message.answer(
-        "💵 Qancha to'ldirmoqchisiz?\n\n"
-        "Iltimos, summani nuqta bilan kiriting.\n"
-        "Masalan: `20.000` yoki `50.000`",
-        parse_mode="Markdown"
-    )
+    await message.answer("💰 To'ldirmoqchi bo'lgan summani kiriting (masalan: 25000):")
     await state.set_state(DepositMoney.amount)
 
 
 @router.message(DepositMoney.amount)
 async def process_amount(message: types.Message, state: FSMContext):
-    amount_text = message.text.strip()
-    amount_digits = amount_text.replace(".", "")
+    amount_text = message.text.strip().replace(" ", "").replace(",", "")
+    if not amount_text.isdigit():
+        return await message.answer("❌ Faqat raqam kiriting!")
 
-    if not amount_digits.isdigit():
-        await message.answer("❌ Xato! Summani faqat raqamlarda va namunadagidek kiriting: `20.000`",
-                             parse_mode="Markdown")
-        return
-
-    amount = int(amount_digits)
-
-    is_busy = await check_if_amount_is_busy(amount)
-
-    if is_busy:
-        await message.answer(
-            f"⚠️ Kechirasiz, `{amount_text}` so'm miqdordagi to'lov hozirda band.\n\n"
-            f"Iltimos, boshqa biror summa kiriting (Chalkashlik bo'lmasligi uchun).\n"
-            f"Masalan: `{amount + 100:,}` so'm kiriting.",
-            parse_mode="Markdown"
-        )
-        return
-
-    await save_active_payment(message.from_user.id, amount)
-    await state.update_data(deposit_amount=amount)
-    await state.set_state(DepositMoney.waiting_pay)
+    amount = int(amount_text)
+    await state.update_data(amount=amount)
 
     await message.answer(
-        f"✅ To'lov buyurtmasi yaratildi!\n\n"
-        f"💰 To'lanadigan summa: **{amount_text} so'm**\n"
-        f"💳 Karta raqami: `{CARD_NUMBER}`\n"
-        f"👤 Karta egasi: **{CARD_OWNER}**\n\n"
-        f"⚠️ **MUHIM:** To'lovni amalga oshirish uchun 20 daqiqa vaqtingiz bor. "
-        f"Aynan kiritilgan summani o'zgarishsiz o'tkazing! "
-        f"Aks holda to'lov tizim tomonidan aniqlanmasligi mumkin.",
-        reply_markup=check_payment_kb(),
-        parse_mode="Markdown"
+        f"💳 <b>To'lov ma'lumotlari:</b>\n\n"
+        f"Karta: <code>{CARD_NUMBER}</code>\n"
+        f"Ega: {CARD_OWNER}\n"
+        f"Summa: {amount:,} so'm\n\n"
+        "To'lovni amalga oshiring va <b>chek rasmini</b> (skrinshot) shu yerga yuboring.",
+        parse_mode="HTML"
+    )
+    await state.set_state(DepositMoney.waiting_photo)
+    return None
+
+
+@router.message(DepositMoney.waiting_photo, F.photo)
+async def handle_receipt(message: types.Message, state: FSMContext, bot: Bot):
+    user_data = await state.get_data()
+    amount = user_data.get("amount")
+
+    caption = (f"🔔 Yangi to'lov!\n\n"
+               f"👤 Foydalanuvchi: @{message.from_user.username} (ID: {message.from_user.id})\n"
+               f"💰 Summa: {amount:,} so'm")
+
+    await bot.send_photo(
+        chat_id=ADMIN_ID,
+        photo=message.photo[-1].file_id,
+        caption=caption,
+        reply_markup=admin_kb(message.from_user.id, amount)
     )
 
-    asyncio.create_task(delete_payment_after_delay(amount, 1200))
-
-
-@router.message(DepositMoney.waiting_pay, F.text == "✅ To'ladim")
-async def confirm_payment(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    amount = data.get("deposit_amount")
-
-    await message.answer(
-        f"⏳ To'lovingiz tekshirilmoqda...\n\n"
-        f"Siz kiritgan {amount:,} so'm tushganligi haqida SMS kelishi bilan balansingiz to'ldiriladi.",
-        reply_markup=main_menu_keyboard()
-    )
+    await message.answer("✅ Rahmat! Chek adminga yuborildi. Tasdiqlashni kuting.")
     await state.clear()
 
 
-@router.message(F.text == "⬅️ Ortga")
-async def back_button(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Asosiy menyuga qaytdingiz.", reply_markup=main_menu_keyboard())
+@router.message(DepositMoney.waiting_photo)
+async def waiting_photo_wrong(message: types.Message):
+    await message.answer("⚠️ Iltimos, to'lov chekini rasm ko'rinishida yuboring.")

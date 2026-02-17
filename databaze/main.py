@@ -1,115 +1,71 @@
-import asyncio
-
 import asyncpg
-from config import DB_NAME, DB_USER, DB_HOST, DB_PASS, DB_PORT
+# Faqat kerakli o'zgaruvchilarni configdan olamiz
+from config import DB_USER, DB_PASS, DB_HOST, DB_PORT, DB_NAME
 
 DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
-
+# 1. db_start funksiyasi (bot.py uchun)
 async def db_start():
-    """Jadvallarni yaratish va bazani tayyorlash"""
+    conn = await asyncpg.connect(DATABASE_URL)
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-
-        # 1. Foydalanuvchilar jadvali
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
-                full_name TEXT,
                 username TEXT,
-                balance FLOAT DEFAULT 0,
-                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                balance BIGINT DEFAULT 0
             )
         """)
-
-        # 2. Buyurtmalar jadvali (orders)
-        # Kelajakda to'lov bo'limida ishlatamiz
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS orders (
-                order_id SERIAL PRIMARY KEY,
+                id SERIAL PRIMARY KEY,
                 user_id BIGINT,
-                amount FLOAT,
+                amount BIGINT,
                 item_details TEXT,
                 status TEXT DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-
+        print("✅ Ma'lumotlar bazasi va jadvallar tayyor.")
+    finally:
         await conn.close()
-        print("✅ PostgreSQL: Barcha jadvallar muvaffaqiyatli yaratildi.")
-    except Exception as e:
-        print(f"❌ Bazani yaratishda xato: {e}")
 
-
-async def create_profile(user_id, full_name, username):
-    """Yangi foydalanuvchini bazaga qo'shish"""
+# 2. create_profile funksiyasi (start.py uchun)
+async def create_profile(user_id, username):
     conn = await asyncpg.connect(DATABASE_URL)
     try:
         await conn.execute("""
-            INSERT INTO users (user_id, full_name, username) 
-            VALUES ($1, $2, $3) 
-            ON CONFLICT (user_id) DO UPDATE 
-            SET full_name = $2, username = $3
-        """, user_id, full_name, username)
+            INSERT INTO users (user_id, username)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO NOTHING
+        """, user_id, username)
     finally:
         await conn.close()
 
-
-async def get_user_data(user_id):
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        return await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
-    finally:
-        await conn.close()
+# 3. get_user_orders funksiyasi (user.py va wallet.py uchun)
 async def get_user_orders(user_id):
-    """Foydalanuvchining barcha xaridlarini ro'yxat ko'rinishida olish"""
     conn = await asyncpg.connect(DATABASE_URL)
     try:
-        rows = await conn.fetch("""
-            SELECT item_name, price, created_at 
-            FROM orders 
-            WHERE user_id = $1 
-            ORDER BY created_at DESC
+        return await conn.fetch("""
+            SELECT amount, item_details, created_at, status
+            FROM orders WHERE user_id = $1 ORDER BY created_at DESC
         """, user_id)
-        return rows
     finally:
         await conn.close()
 
+# 4. update_user_balance funksiyasi (wallet.py uchun)
+async def update_user_balance(user_id: int, amount: int):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        # Balansni yangilash
+        await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
+        # To'lov tarixiga yozish
+        await conn.execute("""
+            INSERT INTO orders (user_id, amount, item_details, status)
+            VALUES ($1, $2, 'Balans to\'ldirish', 'completed')
+        """, user_id, amount)
+    finally:
+        await conn.close()
+
+# 5. get_any_user_history (agar kerak bo'lsa)
 async def get_any_user_history(target_user_id):
-    """Admin uchun: Ixtiyoriy foydalanuvchi tarixini olish"""
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        rows = await conn.fetch("""
-            SELECT item_name, price, created_at 
-            FROM orders 
-            WHERE user_id = $1 
-            ORDER BY created_at DESC
-        """, target_user_id)
-        return rows
-    finally:
-        await conn.close()
-
-async def check_if_amount_is_busy(amount):
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        res = await conn.fetchval("SELECT amount FROM active_payments WHERE amount = $1", amount)
-        return res is not None
-    finally:
-        await conn.close()
-
-async def save_active_payment(user_id, amount):
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        await conn.execute("INSERT INTO active_payments (user_id, amount) VALUES ($1, $2)", user_id, amount)
-    finally:
-        await conn.close()
-
-async def delete_payment_after_delay(amount, delay):
-    await asyncio.sleep(delay)
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        await conn.execute("DELETE FROM active_payments WHERE amount = $1", amount)
-        print(f"DEBUG: {amount} so'mlik so'rov muddati tugagani uchun o'chirildi.")
-    finally:
-        await conn.close()
+    return await get_user_orders(target_user_id)
